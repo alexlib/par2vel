@@ -11,7 +11,7 @@ from par2vel.camera import *
 class testCamera(unittest.TestCase):
 
     def test_X2x(self):
-        cam = Camera((32,32))
+        cam = One2One((32,32))
         X = numpy.array([1.0, 1.0, 0]).reshape(3,-1)
         x = cam.X2x(X)
         self.assertAlmostEqual((x-[1, 1]).sum(),0)
@@ -30,24 +30,22 @@ class testCamera(unittest.TestCase):
         dX = cam.dx2dX(x, dx)
         self.assertAlmostEqual((dX[0:2,:]-dx).sum(),0)
 
-    def test_keywords(self):
+    def test_readwrite(self):
         cam1 = Camera()
-        cam1.focal_length = 0.06
-        cam1.pixel_pitch = (0.00001, 0.00001)
-        filename = 'temporary1.cam'
+        cam1.focal_length = 0.03
+        cam1.pixel_pitch = (0.00002, 0.00002)
+        filename = 'testcam1.txt'
         cam1.save_camera(filename)
         cam2 = Camera()
         cam2.read_camera(filename)
-        self.assertAlmostEqual(cam2.focal_length,0.06)
-        self.assertAlmostEqual(cam2.pixel_pitch[1],0.00001)
+        self.assertAlmostEqual(cam2.focal_length,0.03)
+        self.assertAlmostEqual(cam2.pixel_pitch[1],0.00002)
+        cam3 = Camera(cam1)
+        self.assertAlmostEqual(cam3.focal_length,0.03)
+        cam4 = Camera(filename)
+        self.assertAlmostEqual(cam4.focal_length,0.03)
         os.remove(filename)
 
-##    def test_X2x(self):
-##        cam = Camera((32,32))
-##        cam.set_physical_size()
-##        dx = numpy.array([[1],[0]])
-##        dX = cam.dx2dX(dx,dx) 
-##        self.assertAlmostEqual(numpy.sqrt((dX**2).sum()), 1)
 
 class testLinear2d(unittest.TestCase):
 
@@ -84,24 +82,40 @@ class testLinear2d(unittest.TestCase):
         cam1.focal_length = 0.06
         calib = numpy.array([[0.1, 0, 100], [0, 0.11, 101]])
         cam1.set_calibration(calib)
-        filename = 'temporary2.cam'
+        filename = 'testcam2.txt'
         cam1.save_camera(filename)
         cam2 = Linear2d()
         cam2.read_camera(filename)
         self.assertAlmostEqual(cam2.focal_length,0.06)
         self.assertAlmostEqual((cam2.calib - calib).sum(), 0)
         os.remove(filename)
+        
+    def test_calibrate(self):
+        from numpy import array
+        cam = Linear2d()
+        X = array([[-1, 1,  -1, 1],
+                   [-1, -1,  1, 1.0]])
+        c = array([[10.0,  0, 0],
+                   [0,  10.0, 0]])
+        cam.set_calibration(c)
+        x = cam.X2x(X)
+        cam.calibrate(X, x)
+        self.assertAlmostEqual(abs(cam.calib - c).sum(), 0)
+        x[0,0] += 0.001
+        cam.calibrate(X, x)
+        self.assertNotAlmostEqual(abs(cam.calib - c).sum(), 0)
+        
 
 class testLinear3d(unittest.TestCase):
 
     def test_X2x(self):
         from numpy import array
         cam = Linear3d()
+        X = array([[1.0], [1.0], [0]])
         matrix = array([[1.0, 0, 0, 0],
                         [0.0, 1, 0, 0],
                         [0.0, 0, 0, 1]])
         cam.set_calibration(matrix)
-        X = array([[1.0], [1.0], [0]])
         x_result = array([[1.0],[1.0]])
         x = cam.X2x(X)
         self.assertAlmostEqual((x - x_result).sum(),0)
@@ -114,13 +128,34 @@ class testLinear3d(unittest.TestCase):
                        [0.0, 1, 0, 0],
                        [0.0, 0, 0, 1]])
         cam1.set_calibration(calib)
-        filename = 'temporary4.cam'
+        filename = 'testcam3.txt'
         cam1.save_camera(filename)
         cam2 = Linear3d()
         cam2.read_camera(filename)
         self.assertAlmostEqual(cam2.focal_length,0.04)
         self.assertAlmostEqual((cam2.calib - calib).sum(), 0)
         os.remove(filename)
+        
+    def test_calibrate(self):
+        from numpy import array, pi, hstack
+        cam1 = Scheimpflug()
+        cam1.set_calibration(pi/4, 0.1)
+        X0 = array([
+              [-1,  0,  1, -1, 0, 1, -1, 0, 1.0],
+              [-1, -1, -1,  0, 0, 0,  1, 1, 1.0],
+              [ 0,  0,  0,  0, 0, 0,  0, 0, 0  ]]) * 0.01
+        X = hstack((X0 - [[0],[0],[0.0001]], X0, X0 + [[0],[0],[0.0001]]))
+        x = cam1.X2x(X)
+        cam2 = Linear3d();
+        cam2.calibrate(X, x)
+        x2 = cam2.X2x(X)
+        self.assertTrue((x2 - x).std() < 0.1) #variation less than 0.1 pixel  
+        # the following is a test of x2X from base class
+        x3 = cam2.X2x(X0)
+        X3 = cam2.x2X(x3, z=0)
+        # deviation much smaller than typical scale of 0.01
+        self.assertTrue(abs(X0 - X3).sum() < 0.01 * 0.0001)
+                                     
 
 
 class testScheimpflug(unittest.TestCase):
@@ -162,7 +197,7 @@ class testScheimpflug(unittest.TestCase):
         X = array([[0.0], [0.0], [0.0]])
         dX = array([[0.001], [-0.002], [0.0]])
         x = cam.X2x(X)
-        dx = cam.dX2dx(X, dX)
+        dx = cam.X2x(X+0.5*dX) - cam.X2x(X-0.5*dX)
         dX2 = cam.dx2dX(x, dx)
         self.assertAlmostEqual(abs((dX - dX2).sum()),0)
 
@@ -170,7 +205,7 @@ class testScheimpflug(unittest.TestCase):
         cam1 = Scheimpflug()
         cam1.focal_length = 0.05
         cam1.set_calibration(numpy.pi/4, 0.1)
-        filename = 'temporary3.cam'
+        filename = 'testcam4.txt'
         cam1.save_camera(filename)
         cam2 = Scheimpflug()
         cam2.read_camera(filename)
@@ -179,6 +214,33 @@ class testScheimpflug(unittest.TestCase):
         self.assertAlmostEqual(cam2.M, 0.1)
         os.remove(filename)
 
+class testPinhole(unittest.TestCase):
+    
+    def test_setcalibration(self):
+        from numpy import pi, eye
+        cam = Pinhole()
+        cam.set_calibration([0,0,0],[0,0,0], 1, 0, [0,0])
+        self.assertAlmostEqual((cam.R - numpy.eye(3)).sum(), 0)
+
+    def test_save_read(self):
+        from numpy import array
+        angle = array([0, 0.1, 0.2])
+        T = array([0, 1, 2])
+        f = 0.05
+        k = array([0.01])
+        x0 = array([640, 512])
+        cam1 = Pinhole()
+        cam1.set_calibration(angle, T, f, k, x0)
+        filename = 'testcam5.txt'
+        cam1.save_camera(filename)
+        cam2 = Pinhole()
+        cam2.read_camera(filename)
+        self.assertAlmostEqual(abs((cam2.angle - angle).sum()),0)
+        self.assertAlmostEqual(abs((cam2.T - T).sum()),0)
+        self.assertAlmostEqual(cam2.f,f)
+        self.assertAlmostEqual(abs((cam2.k - k).sum()),0)
+        self.assertAlmostEqual(abs((cam2.x0 - x0).sum()),0)
+        os.remove(filename)
 
 
 if __name__=='__main__':

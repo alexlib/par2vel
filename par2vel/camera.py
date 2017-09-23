@@ -3,7 +3,9 @@
 # Open source software under the terms of the GNU General Public License ver 3
 
 import numpy
+import scipy
 import re
+import numbers
 from PIL import Image
 
 class Camera(object):
@@ -19,22 +21,40 @@ class Camera(object):
                 'focal_length': 'Focal length in meters (float)',
                 'f_number':   'F-number on lens (float)'}
 
-    def __init__(self, pixels=None):
-        """Define a camera, possibly by giving size in pixels"""
+    def __init__(self, data=None):
+        """Define a camera, possibly based on optional argument
+           Options are:
+              - List or array with two integers giving numer of pixels
+              - Another Camera object - keyword values are copied
+              - String with filename of camera file
+        """
         # define camera calibration model (= class)
         self.model = 'base'
         # set some default values (may be overwritten by camera file)
         self.pixel_pitch = (1e-5, 1e-5)  # 10 micron
+        self.pixels = (512, 512) 
         self.fill_ratio = (1.0, 1.0)
         self.noise_mean = 0.0
         self.noise_rms = 0.0
         self.focal_length = 0.06
-        # allow pixels to be changed at creation (mostly for tests)
-        if pixels:
-            self.pixels = pixels
+        # modify using optional argument data
+        if data==None:
+            pass
+        elif type(data)==str:
+            self.read_camera(data)
+        elif isinstance(data, (tuple, list, numpy.ndarray)):
+            assert isinstance(data[0], numbers.Integral)
+            assert isinstance(data[1], numbers.Integral)
+            assert len(data) == 2
+            self.pixels = data
+        elif isinstance(data, Camera):
+            for keyword in self.keywords:
+                try:
+                    exec('self.' + keyword + '=data.' + keyword)
+                except:
+                    pass
         else:
-            self.pixels = (512, 512) # default value
-        assert len(self.pixels) == 2
+            print('Warning: unknown input to camera definition')
         # set shape to pixels
         self.shape = self.pixels
         
@@ -120,8 +140,39 @@ class Camera(object):
         """Use camera model to get camera coordinates x
            from physical cooardinates X.
         """
-        # this is simple model that simply assume samme coordinate system
-        return X[0:2,:]
+        # base Camera class do not have a camera model
+        raise Exception('Base class has no camera model and cannot do X2x')
+
+    def x2X(self, x, z=0):
+        """Solve to finde physical coordinate (with X[2]=z) from 
+           image coordinate x. 
+           In this version z is the same float value for all points.
+           Note: This is the default version that is expensive to evaluate.
+        """
+        from numpy import zeros, vstack
+        from scipy.optimize import minimize
+        X = zeros((3,x.shape[1]))
+        X_guess = zeros((2, 1))
+        for i in range(x.shape[1]):
+            def func(X2):
+                #print('X2.shape',X2.shape)
+                Xin = zeros((3,1))
+                Xin[0:2,:] = X2.reshape((2,1))
+                # Xin = vstack((X2, z))
+                return ((self.X2x(Xin)[:,0] - x[:,i])**2).sum()
+            res = minimize(func, X_guess)
+            X[0 : 2, i] = res.x
+        return X
+
+    def dx2dX(self, x, dx, z=0):
+        """Transform displacement in pixel to physical displacement.
+           The displacement is assumed to be at the z=0 plane in
+           physical space.
+        """
+        # very simple model setting physical coordinates to image coord.
+        from numpy import zeros, vstack
+        dX = self.x2X(x + 0.5 * dx, z) - self.x2X(x - 0.5 * dx, z)
+        return dX      
 
     def record_image(self, image, ijcenter, pitch):
         """Record an image given in physical space"""
@@ -146,10 +197,17 @@ class Camera(object):
 class One2One(Camera):
     """Camera model that assumes object coordinates = image coordinates"""
     # same functions as Camera, but adds inverse functions x2X and dx2dX
-    def __init__(self, newshape=None):
-        Camera.__init__(self,newshape)
+    def __init__(self, data=None):
+        Camera.__init__(self, data)
         # define camera calibration model (= class)
         self.model = 'One2One'
+
+    def X2x(self, X):
+        """Use camera model to get camera coordinates x
+           from physical cooardinates X.
+        """
+        # this is simple model that assume samme coordinate system
+        return X[0:2,:]
 
     def x2X(self, x, z=0):
         """Find physical coordinates from image coordinates
@@ -248,6 +306,29 @@ class Linear2d(Camera):
         x = dot(self.calib,Xone)
         return x
 
+    def calibrate(self, X, x, print_residual=False):
+        """Calibrate using at least 3 data point with points in 
+           physical space X linked to corresponding points in 
+           camera space x. All points cannot be on the same line.
+           
+           If X has two components it is assumed to be points in a plane
+           If X has three compontents the last components is ignored
+        """
+        # expand this to take only two points
+        # this requires guessing 
+        from numpy.linalg import lstsq
+        from numpy import ones, vstack, sqrt
+        assert X.shape[1] > 2
+        assert x.shape[1] > 2
+        myX = vstack((X[0:2,:], ones((1, X.shape[1]))))
+        res = lstsq(myX.T, x.T)
+        calib = res[0].T
+        residual = sqrt((res[1]**2).sum())
+        if print_residual:
+            print('Residual from calibration fit is:', residual)
+        self.set_calibration(calib)
+        
+
     def x2X(self, x, z=0):
         """Find physical coordinates from image coordinates
            We assume that third physical coordinate z=0, providing another
@@ -275,25 +356,10 @@ class Linear2d(Camera):
 
 class Linear3d(Camera):
     """Camera model using Direct Linear Transform (DFT)"""
-    def __init__(self, newshape=None):
-        Camera.__init__(self,newshape)
+    def __init__(self, data=None):
+        Camera.__init__(self, data)
         # define camera calibration model (= class)
         self.model = 'Linear3d'
-
-##    def set_physical_size(self):
-##        """Set a guess on dimensions in physical space"""
-##        from numpy import array, sqrt 
-##        # intersection (roughtly) optical axis and physical plane
-##        x_center = (array([self.shape[1], self.shape[0]]) - 1) * 0.5
-##        x_center.shape = (2, 1)
-##        self.Xopticalaxis = self.x2X(x_center)
-##        # width and height of physical region roughly correponding to image
-##        x0 = array([-0.5, -0.5]).reshape((2,1))
-##        xmax = array([self.shape[1], self.shape[0]]) + x0
-##        self.Xsize = abs(self.x2X(xmax) - self.x2X(x0))  #FIX: not right shape
-##        # size of a 1 pixel displacement in physical space
-##        self.dXpixel = sqrt(((self.x2X(x_center) -
-##                              self.x2X(x_center + [[1],[0]]))**2).sum())
 
     def set_calibration(self, calib):
         """Set calibration parameters"""
@@ -350,14 +416,39 @@ class Linear3d(Camera):
         # apply perspective correction
         x = k[0:2,:] / k[2,:]
         return x
-
-
+    
+    def calibrate(self, X, x, print_residual=False):
+        """Calibrate using at least 12 data point with points in 
+           physical space X linked to corresponding points in 
+           camera space x. There should be variation in all three
+           coordinate directions in X.
+        """
+        from scipy.optimize import minimize
+        from numpy import array
+        # guess corresponding to One2One camera
+        calib = array([[1.0,   0, 0, 0],
+                       [  0, 1.0, 0, 0],
+                       [  0,   0, 0, 1]])
+        a0 = calib.flatten()
+        # make function to be minimized
+        def func(a):
+            calib = a.reshape((3,4))
+            self.set_calibration(calib)
+            return ((self.X2x(X) - x)**2).sum()
+        # do optimization
+        res = minimize(func, a0)
+        calib = res.x.reshape((3,4))
+        self.set_calibration(calib)
+            
 
 class Scheimpflug(Camera):
-    """Camera model for simple Scheimpflug camera"""
+    """Camera model for simple Scheimpflug camera. 
+       This camera is for different tests, but is not meant for use
+       with real experiments.
+    """
     # this camera assumes the coordinatesystem to have origin on optical axis
-    def __init__(self, newshape=None):
-        Camera.__init__(self,newshape)
+    def __init__(self, data=None):
+        Camera.__init__(self, data)
 
     def set_physical_size(self):
         """Set a guess on dimensions in physical space"""
@@ -441,12 +532,13 @@ class Scheimpflug(Camera):
         x = vstack((x0, x1))
         return x
 
-    def x2X(self, x):
+    def x2X(self, x, z=0):
         """Use camera model to get physcial coordinates X from c
-           camera coordinates x (assuming X[2]=0)
+           camera coordinates x (assuming X[2]=0, i.e. z must be 0.
         """
         # using solution from PIV book by Raffel et al (2007), page 215
         from numpy import cos, sin, tan, arctan, vstack, zeros, sqrt
+        assert z == 0
         ni, nj = x.shape
         # find angles and distances
         theta = self.theta
@@ -487,12 +579,111 @@ class Scheimpflug(Camera):
         return dX      
 
 
-    def dX2dx(self, X, dX):
-        """Use camera models to transform displacement in object coordinates
-        to displacement in image coordinates"""
-        dx = self.X2x(X + 0.5 * dX) - self.X2x(X - 0.5 * dX)
-        return dx
-                
+class Pinhole(Camera):
+    """Pinhole model with lens distortion"""
+    
+    def __init__(self, data=None):
+        Camera.__init__(self, data)
+        # define camera calibration model (= class)
+        self.model = 'Pinhole'
+
+    def calculate_R(self):
+        """Calculate rotation matrix from Euler angles"""
+        from numpy import array, sin, cos
+        # equation from Tsai (1987)
+        theta, phi, psi = self.angle
+        self.R = array([
+            [cos(psi) * cos(theta), sin(psi) * cos(theta), -sin(theta)],
+            [-sin(psi) * cos(phi) + cos(psi) * sin(theta) * cos(phi), 
+             cos(psi) * cos(phi) + sin(psi) * sin(theta) * sin(phi),
+             cos(theta) * sin(phi)],
+            [sin(psi) * sin(phi) + cos(psi) * sin(theta) * cos(phi),
+             -cos(psi) * sin(phi) + sin(psi) * sin(theta) * cos(phi),
+             cos(theta) * cos(phi)]
+            ]) 
+
+    def set_calibration(self, angle, T, f, k, x0):
+        from numpy import array
+        assert len(angle) == 3;
+        Tarray = array(T).reshape((3,1))
+        assert type(f) == float or type(f) == int
+        if type(k) == float or type(k) == int: k = array([k])
+        assert len(k) > 0
+        assert len(x0) == 2
+        self.angle = angle # Euler angles for coordinate transformation
+        self.T = Tarray    # Translation vector for coordinate transformation
+        self.f = f         # Effective focal length
+        self.k = k         # lens distortion coefficients (one or more)
+        self.x0 = x0       # pixel coordinates of optical axis
+        self.calculate_R()
+
+    def save_camera(self, filename):
+        """Save camera definition and/or calibration data"""
+        f = open(filename,'w')
+        f.write('# par2vel camera file\n')
+        f.write("model = '{:}'\n".format(self.model))
+        # first save defined keywords
+        self.save_keywords(f)
+        # save calibration
+        print('Calibration Pinhole model', file=f)
+        for number in self.angle:
+            print(repr(number), end=' ', file=f)
+        print(file=f)
+        for number in self.T.flatten():
+            print(repr(number), end=' ', file=f)
+        print(file=f)
+        print(repr(self.f), file=f)
+        for number in self.k:
+            print(repr(number), end=' ', file=f)
+        print(file=f)
+        for number in self.x0:
+            print(repr(number), end=' ', file=f)
+        print(file=f)
+        f.close()
+
+    
+    def read_camera(self, filename):
+        """Read camera definition and/or calibration data"""
+        from numpy import array
+        lines = open(filename).readlines()
+        nlines = len(lines)
+        n = 0
+        while n < nlines:
+            line = lines[n]
+            # check for calibration data
+            if line.lower().find('calibration') == 0:
+                if line.lower().find('pinhole') > 0:
+                    angle = array([float(x) for x in lines[n+1].split()])
+                    T = array([float(x) for x in lines[n+2].split()])
+                    f = float(lines[n+3])
+                    k = array([float(x) for x in lines[n+4].split()])
+                    x0 = array([float(x) for x in lines[n+5].split()])
+                    self.set_calibration(angle, T, f, k, x0)
+                    n += 5                
+            else:
+                self.set_keyword(line)
+            n += 1
+        self.shape = self.pixels
+
+        
+    def X2x(self, X):
+        """Use camera model to get camera coordinates x
+           from physical cooardinates X.
+        """
+        from numpy import dot, sqrt, array
+        # append row of ones below first two rows of X
+        Xc = dot(self.R, X) + self.T      # transform to pinhole coordinates
+        xd = self.f * Xc[0:2,:] / Xc[2,:] # pinhole model
+        r = sqrt(xd[0,:]**2 + xd[1,:])    # radial distance to optical axis
+        xu = xd + k[0] * r                # first order radial distortion
+        for i in range(len(k)-1):
+            xu = k[i + 1] * r**(i+2)      # optional higher order terms
+        pixelpitch = array(self.pixel_pitch).reshape((2,1))
+        x = xu / pixelpitch + self.x0
+        return x
+
+
+               
 def readimage(filename):
     """ Read grayscale image from file 
         Probably only works with tiff and bmp files 
